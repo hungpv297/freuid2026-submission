@@ -66,6 +66,10 @@ python infer.py --data /path/to/images --out out/submission.csv --weights weight
   3 checkpoints = **120 forward passes per image**; budget accordingly for large
   private sets. `--bs` / `--workers` can be tuned; CPU-only inference also works
   (much slower).
+* **Measured:** ≈**65 min for the 7,821 public images** on one H100 with
+  `--bs 16 --shm-size=8g --workers 8` (≈0.5 s/image). The 134,997 private images
+  scale to ≈**19 h on a single H100** — shard `/data` across GPUs or raise `--bs`
+  to reduce wall-clock. Default `--bs 4` is memory-safe (<11 GB) but slower.
 * No network access is used at inference (`timm.create_model(pretrained=False)`;
   weights loaded from local files).
 

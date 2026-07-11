@@ -75,6 +75,13 @@ Public leaderboard (AuDET, lower = better):
   are documented in `train/README_TRAIN.md`.
 * **Hardware:** single NVIDIA H100 (80 GB), CUDA 12.6, PyTorch 2.7.1, timm
   1.0.27.
+* **Measured runtime:** the Docker image (`--network none`, bf16, channels-last,
+  `--bs 16 --shm-size=8g --workers 8`) scores the full **7,821-image public set
+  in ≈65 min** on one H100 — i.e. ≈0.5 s/image for the 40-view × 3-checkpoint
+  dense-crop TTA (120 forward passes/image). The 134,997-image private set scales
+  to **≈19 h on a single H100**; use several GPUs (one shard of `/data` each) or a
+  larger `--bs` to cut wall-clock. The default `--bs 4` is memory-safe (<11 GB,
+  no `--shm-size` needed) but slower; raise it on ≥24 GB GPUs.
 
 ## 6. Notes / limitations
 
