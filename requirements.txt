@@ -1,0 +1,4 @@
+# torch + numpy are provided by the base image (pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime).
+# Only the extra inference deps are pinned here.
+timm==1.0.27
+opencv-python-headless==4.11.0.86
