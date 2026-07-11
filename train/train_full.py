@@ -4,7 +4,7 @@ import numpy as np, pandas as pd, cv2, torch, torch.nn as nn
 cv2.setNumThreads(0)
 from torch.utils.data import DataLoader
 import timm
-sys.path.insert(0,"/mnt/ecai")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # find train_sweep.py alongside this file
 from train_sweep import build_aug, DS
 
 def main():
