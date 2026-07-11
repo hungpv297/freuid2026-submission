@@ -48,6 +48,9 @@ docker run --rm --gpus all --network none \
     -v /abs/path/to/output:/submissions \
     freuid-infer
 # -> /abs/path/to/output/submission.csv
+
+# Faster decode with more dataloader workers needs a larger /dev/shm:
+#   docker run ... --shm-size=8g freuid-infer --workers 8
 ```
 
 Run directly (without Docker):

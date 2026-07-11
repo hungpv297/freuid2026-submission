@@ -40,12 +40,6 @@ FLIPS = (
 )
 
 
-def to_tensor(rgb):
-    x = rgb.astype(np.float32) / 255.0
-    x = (x - MEAN) / STD
-    return torch.from_numpy(x.transpose(2, 0, 1))
-
-
 def make_view(im_native, im_big, kind, sz):
     if kind == "native":
         return im_native
@@ -73,9 +67,11 @@ class ImageDS(Dataset):
             im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
         native = cv2.resize(im, (self.sz, self.sz), interpolation=cv2.INTER_LINEAR)
         big = cv2.resize(im, (self.big, self.big), interpolation=cv2.INTER_LINEAR)
-        views = [to_tensor(make_view(native, big, k, self.sz)) for k in KINDS]
+        # Return raw uint8 CHW views (small -> fits Docker's default 64MB /dev/shm
+        # even with worker processes). Normalisation happens on-device below.
+        views = [np.ascontiguousarray(make_view(native, big, k, self.sz).transpose(2, 0, 1)) for k in KINDS]
         rid = os.path.splitext(os.path.basename(p))[0]
-        return torch.stack(views), rid      # [nkind, 3, sz, sz]
+        return torch.from_numpy(np.stack(views)), rid   # uint8 [nkind, 3, sz, sz]
 
 
 def load_models(weights_dir, device):
@@ -101,12 +97,14 @@ def main():
     ap.add_argument("--out", default="/submissions/submission.csv")
     ap.add_argument("--weights", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"))
     ap.add_argument("--bs", type=int, default=4, help="images per batch (each expands to len(KINDS) views)")
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=2, help="dataloader workers (default 2 fits Docker's 64MB /dev/shm; raise with --shm-size)")
     a = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
+    mean_t = torch.tensor(MEAN, device=device).view(1, 3, 1, 1)
+    std_t = torch.tensor(STD, device=device).view(1, 3, 1, 1)
 
     paths = []
     for e in EXTS:
@@ -125,9 +123,10 @@ def main():
            else torch.autocast("cpu", dtype=torch.bfloat16))
 
     ids_out, scores_out = [], []
-    for views, rid in dl:                    # views [B, nk, 3, sz, sz]
+    for views, rid in dl:                    # uint8 views [B, nk, 3, sz, sz]
         B = views.size(0)
-        x = views.view(B * nk, 3, sz, sz).to(device, non_blocking=True).to(memory_format=torch.channels_last)
+        x = views.view(B * nk, 3, sz, sz).to(device, non_blocking=True).float().div_(255.0)
+        x = ((x - mean_t) / std_t).to(memory_format=torch.channels_last)
         with amp:
             s = torch.zeros(B * nk, device=device, dtype=torch.float32)
             for fn in FLIPS:
