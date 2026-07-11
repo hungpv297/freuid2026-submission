@@ -28,6 +28,11 @@ MEAN = np.array((0.485, 0.456, 0.406), np.float32)
 STD  = np.array((0.229, 0.224, 0.225), np.float32)
 EXTS = ("*.jpeg", "*.jpg", "*.png", "*.webp", "*.bmp", "*.tif", "*.tiff")
 
+# Organizer-sandbox paths (same env-var contract as the starter kit).
+DATA_DIR = os.environ.get("FREUID_DATA_DIR", "/data")
+OUTPUT_DIR = os.environ.get("FREUID_OUTPUT_DIR", "/submissions")
+SUBMISSION_PATH = os.environ.get("FREUID_SUBMISSION_PATH", os.path.join(OUTPUT_DIR, "submission.csv"))
+
 # Dense-crop TTA views: native 512 resize + a 3x3 grid of crops taken from a
 # 1.15x up-scaled image (9 crops) -> 10 crop views. Each is later shown in the
 # 4 orientations of the D2 group on-GPU -> 10 * 4 = 40 views per checkpoint.
@@ -93,8 +98,8 @@ def load_models(weights_dir, device):
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/data")
-    ap.add_argument("--out", default="/submissions/submission.csv")
+    ap.add_argument("--data", default=DATA_DIR)
+    ap.add_argument("--out", default=SUBMISSION_PATH)
     ap.add_argument("--weights", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"))
     ap.add_argument("--bs", type=int, default=4, help="images per batch (each expands to len(KINDS) views)")
     ap.add_argument("--workers", type=int, default=2, help="dataloader workers (default 2 fits Docker's 64MB /dev/shm; raise with --shm-size)")
@@ -136,6 +141,14 @@ def main():
         s = s.view(B, nk).sum(1) / denom     # mean over views * flips * models
         scores_out.append(s.cpu().numpy()); ids_out += list(rid)
     scores = np.concatenate(scores_out)
+
+    # Validate the sandbox contract: exactly one finite row per input image,
+    # ids == filename stems, no missing / no extra (mirrors the starter kit).
+    exp_ids = {os.path.splitext(os.path.basename(p))[0] for p in paths}
+    got_ids = set(ids_out)
+    assert len(ids_out) == len(paths), f"row count {len(ids_out)} != images {len(paths)}"
+    assert got_ids == exp_ids, f"id mismatch (missing {len(exp_ids - got_ids)}, extra {len(got_ids - exp_ids)})"
+    assert np.isfinite(scores).all(), "non-finite scores produced"
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     import csv

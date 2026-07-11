@@ -1,0 +1,9 @@
+.git
+.gitattributes
+.gitignore
+train
+*.md
+*.pdf
+KAGGLE_REPLY.md
+LICENSE
+__pycache__
