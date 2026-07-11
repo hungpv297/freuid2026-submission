@@ -14,6 +14,9 @@ Contract (per reproducibility spec):
             (higher = more confident the document is fraudulent).
   * NO network access is required or performed (pretrained=False; weights are
     loaded from local checkpoint files baked into the image).
+
+Each image is DECODED ONCE and turned into all 40 TTA views in the dataset, so
+inference scales to large private sets (no 10x re-decoding).
 """
 import os, sys, glob, argparse, warnings
 warnings.simplefilter("ignore")
@@ -25,16 +28,16 @@ MEAN = np.array((0.485, 0.456, 0.406), np.float32)
 STD  = np.array((0.229, 0.224, 0.225), np.float32)
 EXTS = ("*.jpeg", "*.jpg", "*.png", "*.webp", "*.bmp", "*.tif", "*.tiff")
 
-# Dense-crop TTA: native + a 3x3 grid of crops taken from a 1.15x up-scaled
-# image, each shown in the 4 orientations of the D2 group (identity, h-flip,
-# v-flip, 180-rotate) -> 10 * 4 = 40 views, averaged in probability space.
-GRID = [(gy, gx) for gy in range(3) for gx in range(3)]
-FLIPS = {
-    "id":   lambda x: x,
-    "hf":   lambda x: torch.flip(x, [3]),
-    "vf":   lambda x: torch.flip(x, [2]),
-    "r180": lambda x: torch.rot90(x, 2, [2, 3]),
-}
+# Dense-crop TTA views: native 512 resize + a 3x3 grid of crops taken from a
+# 1.15x up-scaled image (9 crops) -> 10 crop views. Each is later shown in the
+# 4 orientations of the D2 group on-GPU -> 10 * 4 = 40 views per checkpoint.
+KINDS = ["native"] + [(gy, gx) for gy in range(3) for gx in range(3)]
+FLIPS = (
+    lambda x: x,
+    lambda x: torch.flip(x, [3]),          # h-flip
+    lambda x: torch.flip(x, [2]),          # v-flip
+    lambda x: torch.rot90(x, 2, [2, 3]),   # 180
+)
 
 
 def to_tensor(rgb):
@@ -43,20 +46,20 @@ def to_tensor(rgb):
     return torch.from_numpy(x.transpose(2, 0, 1))
 
 
-def make_view(im, kind, sz):
+def make_view(im_native, im_big, kind, sz):
     if kind == "native":
-        return cv2.resize(im, (sz, sz), interpolation=cv2.INTER_LINEAR)
+        return im_native
     gy, gx = kind
-    big = int(round(sz * 1.15)); off = big - sz
-    r = cv2.resize(im, (big, big), interpolation=cv2.INTER_LINEAR)
+    off = im_big.shape[0] - sz
     y = off * gy // 2; x = off * gx // 2
-    return r[y:y + sz, x:x + sz]
+    return im_big[y:y + sz, x:x + sz]
 
 
 class ImageDS(Dataset):
-    """Returns one CROP variant of every image (native or a grid crop)."""
-    def __init__(self, paths, kind, sz):
-        self.paths, self.kind, self.sz = paths, kind, sz
+    """Decode each image ONCE, return all KINDS crop-views stacked."""
+    def __init__(self, paths, sz):
+        self.paths, self.sz = paths, sz
+        self.big = int(round(sz * 1.15))
 
     def __len__(self):
         return len(self.paths)
@@ -64,12 +67,15 @@ class ImageDS(Dataset):
     def __getitem__(self, i):
         p = self.paths[i]
         im = cv2.imread(p, cv2.IMREAD_COLOR)
-        if im is None:  # unreadable -> neutral grey so we still emit a row
+        if im is None:                      # unreadable -> neutral grey row
             im = np.full((self.sz, self.sz, 3), 128, np.uint8)
         else:
             im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+        native = cv2.resize(im, (self.sz, self.sz), interpolation=cv2.INTER_LINEAR)
+        big = cv2.resize(im, (self.big, self.big), interpolation=cv2.INTER_LINEAR)
+        views = [to_tensor(make_view(native, big, k, self.sz)) for k in KINDS]
         rid = os.path.splitext(os.path.basename(p))[0]
-        return to_tensor(make_view(im, self.kind, self.sz)), rid
+        return torch.stack(views), rid      # [nkind, 3, sz, sz]
 
 
 def load_models(weights_dir, device):
@@ -93,8 +99,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="/data")
     ap.add_argument("--out", default="/submissions/submission.csv")
-    ap.add_argument("--weights", default=os.path.join(os.path.dirname(__file__), "weights"))
-    ap.add_argument("--bs", type=int, default=16)
+    ap.add_argument("--weights", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"))
+    ap.add_argument("--bs", type=int, default=4, help="images per batch (each expands to len(KINDS) views)")
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
 
@@ -112,39 +118,33 @@ def main():
     print(f"[infer] {len(paths)} images | device={device}", flush=True)
 
     models, sz = load_models(a.weights, device)
+    nk = len(KINDS); denom = float(nk * len(FLIPS) * len(models))
+    dl = DataLoader(ImageDS(paths, sz), batch_size=a.bs, shuffle=False,
+                    num_workers=a.workers, pin_memory=(device == "cuda"))
+    amp = (torch.autocast("cuda", dtype=torch.bfloat16) if device == "cuda"
+           else torch.autocast("cpu", dtype=torch.bfloat16))
 
-    # Accumulate summed probability over all (crop-view x flip x model) forwards.
-    kinds = ["native"] + GRID
-    n_views = len(kinds) * len(FLIPS) * len(models)
-    acc = None; ids_ref = None
-    amp = torch.autocast("cuda", dtype=torch.bfloat16) if device == "cuda" else torch.autocast("cpu", dtype=torch.bfloat16)
-    for kind in kinds:
-        dl = DataLoader(ImageDS(paths, kind, sz), batch_size=a.bs, shuffle=False,
-                        num_workers=a.workers, pin_memory=(device == "cuda"))
-        chunk_probs = []; chunk_ids = []
-        for x, rid in dl:
-            x = x.to(device, non_blocking=True).to(memory_format=torch.channels_last)
-            with amp:
-                s = torch.zeros(x.size(0), device=device, dtype=torch.float32)
-                for fn in FLIPS.values():
-                    xf = fn(x)
-                    for m in models:
-                        s += torch.sigmoid(m(xf).squeeze(1).float())
-            chunk_probs.append(s.cpu().numpy()); chunk_ids += list(rid)
-        probs = np.concatenate(chunk_probs)
-        if acc is None:
-            acc = probs; ids_ref = chunk_ids
-        else:
-            acc = acc + probs  # same order (shuffle=False) across kinds
-    scores = acc / n_views
+    ids_out, scores_out = [], []
+    for views, rid in dl:                    # views [B, nk, 3, sz, sz]
+        B = views.size(0)
+        x = views.view(B * nk, 3, sz, sz).to(device, non_blocking=True).to(memory_format=torch.channels_last)
+        with amp:
+            s = torch.zeros(B * nk, device=device, dtype=torch.float32)
+            for fn in FLIPS:
+                xf = fn(x)
+                for m in models:
+                    s += torch.sigmoid(m(xf).squeeze(1).float())
+        s = s.view(B, nk).sum(1) / denom     # mean over views * flips * models
+        scores_out.append(s.cpu().numpy()); ids_out += list(rid)
+    scores = np.concatenate(scores_out)
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     import csv
     with open(a.out, "w", newline="") as f:
         w = csv.writer(f); w.writerow(["id", "label"])
-        for rid, sc in zip(ids_ref, scores):
+        for rid, sc in zip(ids_out, scores):
             w.writerow([rid, f"{float(sc):.6f}"])
-    print(f"[infer] wrote {len(ids_ref)} rows -> {a.out}", flush=True)
+    print(f"[infer] wrote {len(ids_out)} rows -> {a.out}", flush=True)
 
 
 if __name__ == "__main__":
