@@ -42,14 +42,15 @@ git lfs install && git lfs pull
 # 2. build
 docker build -t freuid-infer .
 
-# 3. run — inference only, network disabled
+# 3. run — inference only, network disabled.
+#    Defaults (--workers 0) need NO extra flags: a plain run just works.
 docker run --rm --gpus all --network none \
     -v /abs/path/to/images:/data:ro \
     -v /abs/path/to/output:/submissions \
     freuid-infer
 # -> /abs/path/to/output/submission.csv
 
-# Faster decode with more dataloader workers needs a larger /dev/shm:
+# Optional ~15% faster decode (multi-worker DataLoader needs a bigger /dev/shm):
 #   docker run ... --shm-size=8g freuid-infer --workers 8
 ```
 
@@ -65,12 +66,14 @@ python infer.py --data /path/to/images --out out/submission.csv --weights weight
 * Inference uses bf16 autocast + channels-last. TTA is 4 edge-crops ×
   3 checkpoints = **12 forward passes per image**. `--bs` / `--workers` can be
   tuned; CPU-only inference also works (much slower).
-* **Measured (Docker, `--network none`, default `--bs 16 --workers 8`):**
-  **372 s (6.2 min) for the 7,821 public images** on one H100; the 134,997
-  hidden-test images scale to **≈1.8 h on one H100**. Extrapolated to a single
-  **A100** (2.0× realistic → 3.0× worst-case slowdown): **≈3.6 h – 5.4 h**, i.e.
-  within the challenge's **6-hour single-A100** limit with margin. Shard `/data`
-  across GPUs to cut it further.
+* **Measured (Docker, `--network none`):** the plain-default run (`--workers 0`,
+  no `--shm-size` needed) scores the **7,821 public images in 428 s (7 min)** on
+  one H100 → **≈2.0 h for the 134,997 hidden-test images on one H100**. The
+  faster path (`--shm-size=8g --workers 8`) does it in 372 s → ≈1.8 h. On a
+  single **A100** (2.0× realistic → 3.0× worst-case slowdown) the hidden set is
+  **≈4.1 h (default) / ≈3.6 h (fast path)** up to ≈5–6 h worst-case — within the
+  challenge's **6-hour single-A100** limit. Shard `/data` across GPUs to cut it
+  further.
 * No network access is used at inference (`timm.create_model(pretrained=False)`;
   weights loaded from local files).
 

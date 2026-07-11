@@ -97,7 +97,7 @@ def main():
     ap.add_argument("--out", default=SUBMISSION_PATH)
     ap.add_argument("--weights", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"))
     ap.add_argument("--bs", type=int, default=16, help="images per batch (each expands to len(KINDS)=4 views)")
-    ap.add_argument("--workers", type=int, default=8, help="dataloader workers (4 tiny uint8 views/image fit Docker's 64MB /dev/shm)")
+    ap.add_argument("--workers", type=int, default=0, help="dataloader workers; default 0 (in-process decode) needs NO /dev/shm so a plain `docker run` works. For ~15%% faster decode use e.g. `--shm-size=8g` + `--workers 8`.")
     a = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

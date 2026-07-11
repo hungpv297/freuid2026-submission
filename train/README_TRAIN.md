@@ -81,7 +81,8 @@ python train_full.py --exp ps_full_maxvit_b512_b12 \
 # -> exp/ps_full_maxvit_b512_b12/{ckpt_e10,e11,e12}.pt   (final)
 ```
 
-Inference (dense-crop TTA + 3-checkpoint ensemble) is in `../infer.py`.
+Inference (4-edge-crop TTA + 3-checkpoint ensemble, 12 passes/image) is in
+`../infer.py`.
 
 ## Files
 * `make_folds.py`   — stratified 5-fold split.
