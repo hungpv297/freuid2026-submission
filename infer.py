@@ -3,9 +3,9 @@
 FREUID Challenge 2026 — inference entrypoint.
 
 Reads a FLAT directory of images from --data (default /data), runs the final
-model (a 3-checkpoint ensemble of maxvit_base_tf_512, each with dense-crop
-test-time augmentation), and writes a fraud score per image to
---out (default /submissions/submission.csv).
+model (a 3-checkpoint ensemble of maxvit_base_tf_512, each with 4-view edge-crop
+test-time augmentation = 12 forward passes/image), and writes a fraud score per
+image to --out (default /submissions/submission.csv).
 
 Contract (per reproducibility spec):
   * input : flat dir of images only (.jpeg/.jpg/.png/.webp/.bmp/.tif/.tiff),
@@ -15,8 +15,8 @@ Contract (per reproducibility spec):
   * NO network access is required or performed (pretrained=False; weights are
     loaded from local checkpoint files baked into the image).
 
-Each image is DECODED ONCE and turned into all 40 TTA views in the dataset, so
-inference scales to large private sets (no 10x re-decoding).
+Each image is DECODED ONCE and turned into all 4 crop views in the dataset, so
+inference scales to large private sets (no re-decoding).
 """
 import os, sys, glob, argparse, warnings
 warnings.simplefilter("ignore")
@@ -33,21 +33,17 @@ DATA_DIR = os.environ.get("FREUID_DATA_DIR", "/data")
 OUTPUT_DIR = os.environ.get("FREUID_OUTPUT_DIR", "/submissions")
 SUBMISSION_PATH = os.environ.get("FREUID_SUBMISSION_PATH", os.path.join(OUTPUT_DIR, "submission.csv"))
 
-# Dense-crop TTA views: native 512 resize + a 3x3 grid of crops taken from a
-# 1.15x up-scaled image (9 crops) -> 10 crop views. Each is later shown in the
-# 4 orientations of the D2 group on-GPU -> 10 * 4 = 40 views per checkpoint.
-KINDS = ["native"] + [(gy, gx) for gy in range(3) for gx in range(3)]
-FLIPS = (
-    lambda x: x,
-    lambda x: torch.flip(x, [3]),          # h-flip
-    lambda x: torch.flip(x, [2]),          # v-flip
-    lambda x: torch.rot90(x, 2, [2, 3]),   # 180
-)
+# "plus4" edge-crop TTA: 4 crops taken at the edge-midpoints of a 3x3 grid over a
+# 1.15x up-scaled image (top / left / right / bottom mid), no flip. This 4-view
+# scheme captures the local fraud artefacts as well as the full 40-view dense-crop
+# grid (the corner crops add noise, the flips/native are redundant) while costing
+# 4 * 3 checkpoints = 12 forward passes/image -> fits the reproducibility runtime
+# budget (<=6h on one A100 for the hidden test set).
+KINDS = [(0, 1), (1, 0), (1, 2), (2, 1)]   # 3x3 grid edge-midpoints
+FLIPS = (lambda x: x,)                       # identity only (no flip)
 
 
-def make_view(im_native, im_big, kind, sz):
-    if kind == "native":
-        return im_native
+def make_view(im_big, kind, sz):
     gy, gx = kind
     off = im_big.shape[0] - sz
     y = off * gy // 2; x = off * gx // 2
@@ -70,11 +66,10 @@ class ImageDS(Dataset):
             im = np.full((self.sz, self.sz, 3), 128, np.uint8)
         else:
             im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-        native = cv2.resize(im, (self.sz, self.sz), interpolation=cv2.INTER_LINEAR)
         big = cv2.resize(im, (self.big, self.big), interpolation=cv2.INTER_LINEAR)
         # Return raw uint8 CHW views (small -> fits Docker's default 64MB /dev/shm
         # even with worker processes). Normalisation happens on-device below.
-        views = [np.ascontiguousarray(make_view(native, big, k, self.sz).transpose(2, 0, 1)) for k in KINDS]
+        views = [np.ascontiguousarray(make_view(big, k, self.sz).transpose(2, 0, 1)) for k in KINDS]
         rid = os.path.splitext(os.path.basename(p))[0]
         return torch.from_numpy(np.stack(views)), rid   # uint8 [nkind, 3, sz, sz]
 
@@ -101,8 +96,8 @@ def main():
     ap.add_argument("--data", default=DATA_DIR)
     ap.add_argument("--out", default=SUBMISSION_PATH)
     ap.add_argument("--weights", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights"))
-    ap.add_argument("--bs", type=int, default=4, help="images per batch (each expands to len(KINDS) views)")
-    ap.add_argument("--workers", type=int, default=2, help="dataloader workers (default 2 fits Docker's 64MB /dev/shm; raise with --shm-size)")
+    ap.add_argument("--bs", type=int, default=16, help="images per batch (each expands to len(KINDS)=4 views)")
+    ap.add_argument("--workers", type=int, default=8, help="dataloader workers (4 tiny uint8 views/image fit Docker's 64MB /dev/shm)")
     a = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

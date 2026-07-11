@@ -9,9 +9,9 @@ no network access**.
 
 An **ensemble of 3 checkpoints (epochs 10, 11, 12)** of `maxvit_base_tf_512`
 trained on the full competition training set augmented with self-generated
-pseudo-labels, each checkpoint scored with **dense-crop test-time augmentation**
-(native image + a 3×3 grid of 1.15× crops, each in the 4 D2 orientations = 40
-views), averaged in probability space.
+pseudo-labels, each checkpoint scored with **4-view edge-crop test-time
+augmentation** (the 4 edge-midpoint crops of a 1.15× up-scaled image, no flip)
+= 12 forward passes/image, averaged in probability space.
 
 ## Repository layout
 
@@ -62,14 +62,15 @@ python infer.py --data /path/to/images --out out/submission.csv --weights weight
 ## Hardware / runtime
 
 * Developed and tested on a single **NVIDIA H100 (80 GB)**, CUDA 12.6.
-* Inference uses bf16 autocast + channels-last. Dense-crop TTA is 40 views ×
-  3 checkpoints = **120 forward passes per image**; budget accordingly for large
-  private sets. `--bs` / `--workers` can be tuned; CPU-only inference also works
-  (much slower).
-* **Measured:** ≈**65 min for the 7,821 public images** on one H100 with
-  `--bs 16 --shm-size=8g --workers 8` (≈0.5 s/image). The 134,997 private images
-  scale to ≈**19 h on a single H100** — shard `/data` across GPUs or raise `--bs`
-  to reduce wall-clock. Default `--bs 4` is memory-safe (<11 GB) but slower.
+* Inference uses bf16 autocast + channels-last. TTA is 4 edge-crops ×
+  3 checkpoints = **12 forward passes per image**. `--bs` / `--workers` can be
+  tuned; CPU-only inference also works (much slower).
+* **Measured (Docker, `--network none`, default `--bs 16 --workers 8`):**
+  **372 s (6.2 min) for the 7,821 public images** on one H100; the 134,997
+  hidden-test images scale to **≈1.8 h on one H100**. Extrapolated to a single
+  **A100** (2.0× realistic → 3.0× worst-case slowdown): **≈3.6 h – 5.4 h**, i.e.
+  within the challenge's **6-hour single-A100** limit with margin. Shard `/data`
+  across GPUs to cut it further.
 * No network access is used at inference (`timm.create_model(pretrained=False)`;
   weights loaded from local files).
 

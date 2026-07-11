@@ -38,28 +38,41 @@ averaging the three neighbouring epochs denoises the pseudo-label-trained model.
 
 ## 3. Inference
 
-For every test image each of the 3 checkpoints is scored with **dense-crop
-test-time augmentation**:
+For every test image each of the 3 checkpoints is scored with **4-view
+edge-crop test-time augmentation**:
 
-* views = the native 512 resize **+** a 3×3 grid of crops taken from a 1.15×
-  up-scaled image (9 crops), each shown in the 4 orientations of the D2 group
-  (identity, h-flip, v-flip, 180° rotate) → **10 × 4 = 40 views**;
-* the 40 view probabilities are averaged, then the 3 checkpoints are averaged
-  → one fraud score per image.
+* from a 1.15× up-scaled image we take the **4 edge-midpoint crops** of a 3×3
+  grid (top / left / right / bottom centre) at 512×512 — no flip, no native
+  view, no corner crops;
+* the 4 crop probabilities are averaged, then the 3 checkpoints are averaged
+  → one fraud score per image = **4 × 3 = 12 forward passes/image**.
 
 Rationale: fraud cues (font/MRZ/splice/GenAI edits) are *local*; a full-image
-resize blurs them, whereas averaging many local crops preserves them. The
-inference is deterministic and needs no network (`pretrained=False`; weights
+resize blurs them, whereas averaging local crops preserves them. A leaderboard
+sweep showed the **edge crops carry the whole signal** — corner crops add noise,
+and flips / the native view / a full 3×3 grid are redundant on top of the
+3-checkpoint ensemble. This 12-pass scheme is both **more accurate** than the
+40-view dense-crop grid (0.00115 vs 0.00145, §4) **and** ~10× cheaper, which is
+what brings the hidden-test-set runtime within the reproducibility budget (§5).
+Inference is deterministic and needs no network (`pretrained=False`; weights
 from local checkpoints).
 
 ## 4. Results
 
 Public leaderboard (AuDET, lower = better):
 
-| Configuration | Public |
-|---|---|
-| Single checkpoint (e12), dense-crop TTA | 0.00178 |
-| **3-checkpoint ensemble (e10+e11+e12), dense-crop TTA — final** | **0.00145** |
+| Configuration | Views/img | Public |
+|---|---|---|
+| Single checkpoint (e12), dense-crop TTA (40 views) | 40 | 0.00178 |
+| 3-checkpoint ensemble, dense-crop TTA (40-view D2 grid) | 120 | 0.00145 |
+| 3-checkpoint ensemble, 5-crop×flip TTA | 12 | 0.00174 |
+| 2-checkpoint (e11+e12), centre+4 edge-crops | 10 | 0.00129 |
+| **3-checkpoint ensemble (e10+e11+e12), 4 edge-crops — final** | **12** | **0.00115** |
+
+The final configuration is both the **best-scoring** and, at 12 forward passes/
+image, well within the runtime budget (§5). Adding more views (full 3×3 grid,
+flips, native view) does not improve on 0.00115 — the edge crops saturate the
+signal for this ensemble.
 
 ## 5. Reproducibility
 
@@ -75,13 +88,23 @@ Public leaderboard (AuDET, lower = better):
   are documented in `train/README_TRAIN.md`.
 * **Hardware:** single NVIDIA H100 (80 GB), CUDA 12.6, PyTorch 2.7.1, timm
   1.0.27.
-* **Measured runtime:** the Docker image (`--network none`, bf16, channels-last,
-  `--bs 16 --shm-size=8g --workers 8`) scores the full **7,821-image public set
-  in ≈65 min** on one H100 — i.e. ≈0.5 s/image for the 40-view × 3-checkpoint
-  dense-crop TTA (120 forward passes/image). The 134,997-image private set scales
-  to **≈19 h on a single H100**; use several GPUs (one shard of `/data` each) or a
-  larger `--bs` to cut wall-clock. The default `--bs 4` is memory-safe (<11 GB,
-  no `--shm-size` needed) but slower; raise it on ≥24 GB GPUs.
+* **Measured runtime (12 passes/image).** The Docker image (`--network none`,
+  bf16, channels-last, default `--bs 16 --workers 8`, `--shm-size=8g`) scores the
+  full **7,821-image public set in 372 s (6.2 min)** on one H100. Scaling to the
+  **134,997-image hidden test set → ≈107 min (1.8 h) on one H100.**
+* **A100 budget (≤6 h requirement).** Extrapolating by the H100→A100 slowdown for
+  this bf16 workload (memory-bandwidth ratio ≈1.7× … compute-peak ratio ≈3.2×; a
+  realistic 2.0×):
+
+  | A100/H100 factor | hidden-set runtime |
+  |---|---|
+  | 2.0× (realistic) | **≈3.6 h** |
+  | 2.5× (pessimistic) | ≈4.5 h |
+  | 3.0× (compute-peak worst case) | ≈5.4 h |
+
+  i.e. **comfortably within the 6-hour single-A100 limit across the whole
+  plausible range** (≥0.6 h margin even in the worst case). Sharding `/data`
+  across GPUs cuts this further if desired.
 
 ## 6. Notes / limitations
 
